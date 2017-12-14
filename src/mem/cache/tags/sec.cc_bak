@@ -1,0 +1,544 @@
+
+/*
+ * Copyright (c) 2012-2013 ARM Limited
+ * All rights reserved.
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
+ * Copyright (c) 2003-2005,2014 The Regents of The University of Michigan
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met: redistributions of source code must retain the above copyright
+ * notice, this list of conditions and the following disclaimer;
+ * redistributions in binary form must reproduce the above copyright
+ * notice, this list of conditions and the following disclaimer in the
+ * documentation and/or other materials provided with the distribution;
+ * neither the name of the copyright holders nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Authors: Erik Hallnor
+ */
+
+/**
+ * @file
+ * Definitions of a SEC tag store.
+ */
+
+#include "mem/cache/tags/sec.hh"
+
+#include "debug/CacheRepl.hh"
+#include "mem/cache/base.hh"
+
+SEC::SEC(const Params *p)
+    : BaseSetAssoc(p)
+{
+	std::cout<<" L3 sector size "<<p->size <<" sec " << secSize<<" assoc "<<assoc<<"dicr_size" <<dictLimit <<std::endl;
+}
+
+
+CacheBlk*
+SEC::accessBlock(Addr addr, bool is_secure, Cycles &lat)
+{
+    CacheBlk *blk = BaseSetAssoc::accessBlock(addr, is_secure, lat);
+
+    if (blk != nullptr) {
+        // move this block to head of the MRU list
+        if(blk->isChild)
+			sets[blk->set].moveToHead(blk->parent);
+		else
+			sets[blk->set].moveToHead(blk);
+        DPRINTF(CacheRepl, "set %x: moving blk %x (%s) to MRU\n",
+                blk->set, regenerateBlkAddr(blk->tag, blk->set),
+                is_secure ? "s" : "ns");
+    }	
+    return blk;
+}
+
+CacheBlk*
+SEC::findVictim(Addr addr)
+{
+    int set = extractSet(addr);
+    // grab a replacement candidate
+    BlkType *blk = nullptr;
+    for (int i = assoc - 1; i >= 0; i--) {
+        BlkType *b = sets[set].blks[i];
+        if (!b->isChild && (b->compactSize != 0 || !b->isValid() )) {
+            blk = b;
+            //blk->compactSize = 1;
+            break;
+        }
+    }
+    assert(!blk || blk->way < allocAssoc);
+
+    if (blk && blk->isValid()) {
+        DPRINTF(CacheRepl, "set %x: selecting blk %x for replacement\n",
+                set, regenerateBlkAddr(blk->tag, set));
+    }
+	//if(blk && blk->parent != nullptr && blk->parent->isValid() ) {
+	//	invalidate(blk->parent);
+
+	//}
+    return blk;
+}
+
+CacheBlk*
+SEC::findVictimChild(Addr addr)
+{
+	//return findSubBlk(addr);
+    int set = extractSet(addr);
+    // grab a replacement candidate
+    BlkType *blk = findSubBlk(addr);
+    if(blk != nullptr) return blk;
+
+    for (int i = assoc - 1; i >= 0; i--) {
+        BlkType *b = sets[set].blks[i];
+        if (!b->isValid() && b->isChild) {
+            blk = b;
+            break;
+        }
+    }
+    
+    assert(blk && blk->isChild);
+	if(blk->parent != nullptr) delink(blk->parent);
+    if (blk && blk->isValid()) {
+        DPRINTF(CacheRepl, "set %x: selecting blk %x for replacement\n",
+                set, regenerateBlkAddr(blk->tag, set));
+    }
+
+    return blk;
+}
+/*void takeupBlk(Addr addr){
+	int set = extractSet(addr);
+    // grab a replacement candidate
+    BlkType *blk = nullptr;
+    for (int i = assoc - 1; i >= 0; i--) {
+        BlkType *b = sets[set].blks[i];
+        if (!b->isChild) {
+            blk = b;
+            break;
+        }
+    }
+    assert(!blk || blk->way < allocAssoc);
+
+    if (blk && blk->isValid()) {
+        DPRINTF(CacheRepl, "set %x: selecting blk %x for replacement\n",
+                set, regenerateBlkAddr(blk->tag, set));
+    }
+    blk->tag = -1;	
+    return blk; 
+}*/
+CacheBlk*
+SEC::findSubBlk(Addr addr )
+{
+    /**
+     * Way_id returns the id of the way that matches the block
+     * If no block is found way_id is set to assoc.
+     */
+     
+     // change the function to find the linked blocks
+    int set = extractSet(addr);
+	Addr tag = extractTag(addr);
+    /*for (int i = 0; i < assoc; ++i) {
+        if (blks[i]->tag == tag && blks[i]->isValid() &&
+            blks[i]->isSecure() == is_secure) {
+            way_id = i;
+            return blks[i];
+        }
+    }*/
+    for (int i = 0; i < assoc; ++i) {	 // sector tag match	
+		CacheBlk * cur = sets[set].blks[i];	
+		if(cur->tag == tag ) {
+			return sets[set].blks[i];
+		}
+	}
+    return nullptr;
+}
+CacheBlk* 
+SEC::findVictim(Addr addr, PacketPtr pkt) 
+{
+	int set = extractSet(addr);
+	Addr tag = extractTag(addr);
+	CacheBlk * cblk = nullptr;
+	CacheBlk * ret = nullptr;
+	int ifCompress = 0;
+	numofReplacement += 1;
+	for (int i = 0; i < assoc; ++i) {
+		cblk = sets[set].blks[i];
+		// find the blk from the same sector and attempt to compress it
+		if ( cblk != nullptr && !cblk->isChild && cblk->parent == nullptr &&(secLimit? (cblk->tag xor tag ) < secSize :true ) ){
+			if(cblk->dictionary.size() == 0 || cblk->dictionary2.size() == 0){ 
+				assert(cblk->next == nullptr);
+				BaseSetAssoc::extractDict(cblk->data, cblk->dictionary, 64, entrySize, 0);
+				BaseSetAssoc::extractDict(cblk->data, cblk->dictionary2, 64, entrySize, 4);
+				if(cblk->dictionary.size() > 8 && cblk->dictionary2.size() > 4)
+					selfNoCompress ++;
+				if(dictLimit < 11){
+					selfCompressiblity[cblk->dictionary.size()]++;
+					selfCompressiblity2[cblk->dictionary2.size() > 5 ? 6:cblk->dictionary2.size() ]++;
+				}
+				cblk->masterkeys = cblk->dictionary.size();
+			}
+			if(compactLimit == 0 ){
+				CacheBlk * child = findVictimChild(addr);
+				child->parent = cblk;
+				return child;
+			}
+			sameSector += cblk->compactSize;
+			ifCompress = checkcompressbility(cblk, pkt, entrySize);
+			if((ifCompress & 1 ) != 0 ){ // DISH works
+				//ret = cblk; 
+				if( (cblk->tag xor tag ) < secSize ){
+						CacheBlk * child = findVictimChild(addr);
+						child->parent = cblk;
+						return child;
+				}
+			}else if( ifCompress && dictLimit != 8 ){
+				if( cblk->compactSize == 1 && (ifCompress & 4) != 0  )	{ // combine two blocks with extended keys
+					//ret = cblk; 
+					if( (cblk->tag xor tag ) < secSize ){
+						CacheBlk * child = findVictimChild(addr);
+						child->parent = cblk;
+						return child;
+					}
+				}else if( (ifCompress & 1) == 0 && cblk->next!= nullptr){ // add an extra blk, cannot handled by DISH
+					ret = findSubBlk(addr);
+					if(ret != nullptr) return ret;
+					ret = findVictim(addr);
+					ret->parent = cblk;
+					cblk->parent = ret;
+					return ret;
+				}
+			}
+						
+		}
+	}
+	/*if(ret != nullptr){
+		CacheBlk * child = findVictimChild(addr);
+		child->parent = ret;
+		return child;
+	}*/
+	return findVictim(addr);	
+}
+void 
+SEC::copyData(PacketPtr pkt, CacheBlk *blk)
+{
+	 Addr addr = pkt->getAddr();
+	 Addr tag = extractTag(addr);
+	 int set = extractSet(addr);
+		// prefer to evict an invalid block
+	CacheBlk *cblk = nullptr;
+	 for (int i = 0; i < allocAssoc; ++i) {
+		cblk = sets[set].blks[i];
+		if ( cblk->isValid() ){	
+				if(cblk->tag == tag){
+					std::memcpy(cblk->data, pkt->getConstPtr<uint8_t>(), blkSize);	
+					return;
+				}
+			}
+		}
+	 //assert(cblk != nullptr && cblk->tag == tag);
+}
+	 
+CacheBlk *
+SEC::insertBlock(PacketPtr pkt, BlkType * &blk)
+{
+	if(dictLimit > 20){
+		std::unordered_map<uint64_t, int> dictionary;
+		std::unordered_map<uint64_t, int> dictionary2;
+		BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), dictionary, 64, entrySize, 0);
+		BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), dictionary2, 64, entrySize, 4);
+	
+		selfCompressiblity[dictionary.size()]++;
+		selfCompressiblity2[dictionary2.size() > 5 ? 6:dictionary2.size() ]++;
+		const uint64_t* dat = pkt->getConstPtr<uint64_t>();
+		std::vector<uint64_t> cur;
+		for(int i =0 ;i<8; i++){
+			cur.push_back(dat[i]);
+			//dat++;
+		}
+		patterns[cur] += 1;		
+	}
+	 Addr addr = pkt->getAddr();
+	 MasterID master_id = pkt->req->masterId();
+	 uint32_t task_id = pkt->req->taskId();
+	 int set = extractSet(addr);
+	 Addr tag = extractTag(addr);
+	 
+	 totalBlocks += 1;
+	
+	 // If we're replacing a block that was previously valid update
+	 // stats for it. This can't be done in findBlock() because a
+	 // found block might not actually be replaced there if the
+	 // coherence protocol says it can't be.
+	 // check if we can compress the new block into this valid block
+	 if (blk->isChild || blk->parent != nullptr) {
+		 //intialize the dictionary for solo block
+		CacheBlk *cblk = blk->parent;
+		assert(blk->next == nullptr);
+		if(!blk->isChild) {
+			delink(blk);
+			blk->parent = cblk;
+			cblk->parent = blk;
+			//blk->compactSize = 0;
+			/*blk->status = 0x07;
+			blk->tag = 0;
+			blk = findVictimChild(addr);
+			blk->parent = cblk;*/
+		}
+		// prefer to evict an invalid block
+		/*for (int i = 0; i < assoc; ++i) {
+			cblk = sets[set].blks[i];
+			// find the blk from the same sector and attempt to compress it
+			if ( !cblk->isChild && cblk->isValid() &&  cblk->compactSize < secSize && (secLimit? (cblk->tag xor tag ) < secSize :true ) ){		
+				if(cblk->dictionary.size() == 0 || cblk->dictionary2.size() == 0){ 
+					assert(cblk->next == nullptr);
+					BaseSetAssoc::extractDict(cblk->data, cblk->dictionary, 64, entrySize, 0);
+					BaseSetAssoc::extractDict(cblk->data, cblk->dictionary2, 64, entrySize, 4);
+				}
+			
+				bool ifCompress = checkcompressbility(cblk, pkt, entrySize);
+				if(ifCompress){ // add the compressde blk by Qi					
+					BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), cblk->dictionary, 64, entrySize, 0);
+					BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), cblk->dictionary2, 64, entrySize, 4);
+					cblk->compactSize ++;
+					DPRINTF(Cache, "compression happens: %s %d\n", pkt->print(), cblk->compactSize);
+					
+					std::cout<<"compression happens "<<pkt->print()<<cblk->compactSize<< ") way = " <<std::dec<<newBlk->way <<" @ "<<std::hex<< set<<" with "<< (uint64_t)newBlk->data << " ctag: "<<tag <<"? ptag: " << cblk->tag <<std::endl;
+					CacheBlk*  current = cblk;
+					while(current->next != nullptr)
+						current = current->next;
+					current->next = newBlk;
+					//uint8_t * dBlk = new uint8_t[blkSize];						
+					//newBlk = cblk->next;
+					newBlk->tag = tag;
+					newBlk->srcMasterId = master_id;
+					newBlk->task_id = task_id;
+					newBlk->tickInserted = curTick();
+					newBlk->isTouched = true;
+					newBlk->isChild = true;
+					newBlk->parent = cblk;	
+					blk = newBlk;
+					break;// found once  and break
+				}
+			}				
+		 }			*/ 
+		int ifCompress = checkcompressbility(cblk, pkt, entrySize);
+		
+		if(ifCompress || compactLimit == 0){ // add the compressde blk by Qi					
+			BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), cblk->dictionary, 64, entrySize, 0);
+			BaseSetAssoc::extractDict(pkt->getConstPtr<uint8_t>(), cblk->dictionary2, 64, entrySize, 4);
+			if(cblk->compactSize < 3){
+				int newKeys = BaseSetAssoc::countUniqueKeys(pkt->getConstPtr<uint8_t>(), 64, entrySize, 0);
+				if( newKeys > cblk->masterkeys)
+					cblk->masterkeys = newKeys;
+			}
+			/*schemeUsed[ifCompress]++;
+			if(cblk->curScheme == 0 && ifCompress == 3){ // if there is compressible by both schemes;
+				cblk->curScheme = 2; 
+				schemeUsed[3]--;
+				schemeUsed[4]++;
+			}
+			else
+				cblk->curScheme = ifCompress;
+			assert(cblk->curScheme  < 3);	
+			*/
+			//cblk->compactSize++;
+			//assert(cblk->compactSize <5);
+			
+			if(cblk->compactSize <5) compactSizeCount[cblk->compactSize]++;
+			
+			DPRINTF(Cache, "Compression happens: %s %d\n", pkt->print(), cblk->compactSize);
+			//std::cout<<"compression happens "<<pkt->print()<<cblk->compactSize<< ") pway = " <<std::dec<<cblk->way <<" cway = "<<blk->way <<" @ "<<std::hex<< set<<" with "<< (uint64_t)blk->data << " ctag: "<<tag <<"? ptag: " << cblk->tag <<std::endl;
+			
+			if(blk->tag != tag){
+				CacheBlk*  current = cblk;
+				int csize = 1;
+				//bool blkFound = false;
+				while(current->next != nullptr){
+					assert(current->tag != tag);
+					if(cblk->compactSize >= 3) std::cout<<current->tag<<" ";
+					current = current->next;
+					csize++;
+
+				}			
+				current->next = blk;
+				blk->next = nullptr;
+				if(cblk->parent == nullptr) csize++;
+
+				cblk->compactSize = csize;
+				if(cblk->compactSize >=4 ) std::cout<<tag<<" size "<<cblk->compactSize<<std::endl;
+				
+			}
+			//uint8_t * dBlk = new uint8_t[blkSize];						
+			//newBlk = cblk->next;
+		}
+	 }
+	
+	if (!blk->isTouched) {
+		 tagsInUse++;
+		 blk->isTouched = true;
+		 if (!warmedUp && tagsInUse.value() >= warmupBound) {
+			 warmedUp = true;
+			 warmupCycle = curTick();
+		}
+	}
+
+	// If we're replacing a block that was previously valid update
+	// stats for it. This can't be done in findBlock() because a
+	// found block might not actually be replaced there if the
+	// coherence protocol says it can't be.
+	if (!blk->isChild && blk->next != nullptr && blk->dictionary.size() > 0) {
+		
+		if(blk->dictionary.size() > 64 ) std::cout<<"too many keys:" << blk->dictionary.size()<<std::endl;
+		//else std::cout<<"keys:" << blk->dictionary.size()<<std::endl;
+		sectorCount[((int)blk->dictionary.size()-1)/4]++;
+		if(blk->dictionary.size() <= 8){ //DISH handles it
+			SchemeCount[blk->compactSize]++;
+		}else if(blk->compactSize == 2){
+			SchemeCount[5]++; // extended keys handle it
+		}else if(blk->compactSize > 2){
+			assert(blk->compactSize < 5);
+			SchemeCount[blk->compactSize + 6]++;
+			//sectorCount[((int)blk->dictionary.size()-1)/4]++;
+		}
+	}
+	if(!blk->isChild && blk->parent == nullptr) //important
+		delink(blk);
+
+
+	if (blk->isValid()) {				 
+		 replacements[0]++;
+		 totalRefs += blk->refCount;
+		 ++sampledRefs;
+		 blk->refCount = 0;
+
+		 // deal with evicted block
+		 //assert(blk->srcMasterId < cache->system->maxMasters());
+		 //occupancies[blk->srcMasterId]--;
+		 blk->invalidate();	
+		 totalBlocks --;		 
+	}
+	//std::cout<<"inserting to it"<<std::endl;
+
+	blk->isTouched = true;
+
+	// Set tag for new block.  Caller is responsible for setting status.
+	blk->tag = tag;
+
+	// deal with what we are bringing in
+	//assert(master_id < cache->system->maxMasters());
+	//occupancies[master_id]++;
+	blk->srcMasterId = master_id;
+	blk->task_id = task_id;
+	blk->tickInserted = curTick();
+	//blk->compactSize = 1;
+	
+		
+	// We only need to write into one tag and one data block.
+	tagAccesses += 1;
+	dataAccesses += 1;
+	//if(blk->compactSize == 0 ) blk->compactSize = 1;
+	//calculate the compression ratio
+	double compactedBlocks = 0.0;
+	int validBlocks = 0;
+	for(int j = 0; j<assoc; j++){
+		if(!sets[set].blks[j]->isChild && sets[set].blks[j]->isValid()){
+			compactedBlocks += sets[set].blks[j]->compactSize;
+			validBlocks += 1;
+		}
+	}
+	//if(compactedBlocks > validBlocks) std::cout<< set <<" "<< compactedBlocks << " "<< validBlocks<<std::endl;
+	if(compactedBlocks > maxCompacted.value()) maxCompacted = compactedBlocks;
+	avgCompression += compactedBlocks/validBlocks;
+	numOfInsertion++;
+	if(blk->isChild)
+		sets[set].moveToHead(blk->parent);
+	else{
+		sets[set].moveToHead(blk);
+	}
+	return nullptr;
+}
+
+void
+SEC::delink(CacheBlk *blk){
+    if(!blk->isChild){
+		CacheBlk * cur = blk->next;
+		CacheBlk * prev = blk->next;
+		while(cur != nullptr ){
+			if(cur->isValid()) BaseSetAssoc::invalidate(cur);
+			totalBlocks--;
+			prev = cur;
+			cur = cur->next;
+			prev->next = nullptr;
+			prev->invalidate();
+			prev->parent = nullptr;
+			assert(cur != blk);
+			
+		}
+		blk->invalidate();
+		blk->next = nullptr;
+		blk->parent = nullptr;
+		blk->dictionary.clear();
+		blk->dictionary2.clear();
+		blk->compactSize = 1;
+		blk->curScheme = 0;
+	}
+}
+void
+SEC::invalidate(CacheBlk *blk)
+{
+    BaseSetAssoc::invalidate(blk);
+	totalBlocks --;
+    // should be evicted before valid blocks
+    int set = blk->set;
+    blk->compactSize = 1;
+    CacheBlk** blks = sets[set].blks;
+    delink(blk);
+    //blk->parent = nullptr;
+	if (blks[assoc - 1] == blk)
+		return;
+
+    // write 'next' block into blks[i], moving from LRU to MRU
+    // until we overwrite the block we moved to tail.
+
+    // start by setting up to write 'blk' into tail
+	int i = assoc - 1; //Qi
+	CacheBlk *next = blk;
+
+
+	do {
+		assert(i >= 0);
+		if(!blks[i]->isChild)
+			std::swap(blks[i], next);
+		--i;
+	} while (next != blk);
+	
+}
+
+SEC*
+SECParams::create()
+{
+    return new SEC(this);
+}
